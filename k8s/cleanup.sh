@@ -6,7 +6,7 @@ set -e
 echo "🧹 Cleaning up infinigram deployment..."
 
 # Delete all resources in the default namespace
-kubectl delete deployment infinigram-api --ignore-not-found=true
+kubectl delete deployment infinigram --ignore-not-found=true
 kubectl delete service infinigram-service --ignore-not-found=true
 kubectl delete ingress infinigram-ingress --ignore-not-found=true
 kubectl delete configmap infinigram-config --ignore-not-found=true

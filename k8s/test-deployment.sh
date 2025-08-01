@@ -7,11 +7,11 @@ echo "🧪 Testing infinigram deployment..."
 
 # Wait for pods to be ready
 echo "⏳ Waiting for pods to be ready..."
-kubectl wait --for=condition=ready pod -l app=infinigram-api --timeout=300s
+kubectl wait --for=condition=ready pod -l app=infinigram --timeout=300s
 
 # Check pod status
 echo "📋 Pod status:"
-kubectl get pods -l app=infinigram-api
+kubectl get pods -l app=infinigram
 
 # Test health endpoint
 echo "🏥 Testing health endpoint..."
@@ -45,7 +45,7 @@ kill $PF_PID 2>/dev/null || true
 echo "✅ Deployment test completed!"
 echo ""
 echo "📊 To monitor the deployment:"
-echo "   kubectl logs -l app=infinigram-api -f"
+echo "   kubectl logs -l app=infinigram -f"
 echo ""
 echo "🌐 To access the API:"
 echo "   kubectl port-forward service/infinigram-service 8080:80" 
