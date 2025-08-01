@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Deploy infini-gram to Kubernetes
+# Deploy infinigram to Kubernetes
 set -e
 
-echo "🚀 Deploying infini-gram to Kubernetes..."
+echo "🚀 Deploying infinigram to Kubernetes..."
 
 # Build the Docker image
 echo "📦 Building Docker image..."
-docker build -t infinigram-api:latest .
+docker build -t infinigram:latest .
 
 # Apply Kubernetes manifests
 echo "🔧 Applying Kubernetes manifests..."
@@ -36,10 +36,10 @@ kubectl apply -f k8s/network-policy.yaml
 echo "✅ Deployment completed!"
 echo ""
 echo "📋 Status:"
-kubectl get pods -l app=infinigram-api
+kubectl get pods -l app=infinigram
 echo ""
 echo "🌐 To access the service:"
 echo "   kubectl port-forward service/infinigram-service 8080:80"
 echo ""
 echo "📊 To check logs:"
-echo "   kubectl logs -l app=infinigram-api -f" 
+echo "   kubectl logs -l app=infinigram -f" 

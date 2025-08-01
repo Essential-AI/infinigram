@@ -18,7 +18,7 @@ kubectl delete networkpolicy infinigram-network-policy --ignore-not-found=true
 read -p "Do you want to remove the Docker image? (y/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
-    docker rmi infinigram-api:latest --force 2>/dev/null || true
+    docker rmi infinigram:latest --force 2>/dev/null || true
     echo "🗑️  Docker image removed"
 fi
 

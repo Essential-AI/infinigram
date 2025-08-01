@@ -1,7 +1,0 @@
-# This file is no longer needed as we're using the default namespace
-# apiVersion: v1
-# kind: Namespace
-# metadata:
-#   name: infini-gram
-#   labels:
-#     name: infini-gram 

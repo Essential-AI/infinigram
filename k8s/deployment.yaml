@@ -1,23 +1,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: infinigram-api
+  name: infinigram
   namespace: default
   labels:
-    app: infinigram-api
+    app: infinigram
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: infinigram-api
+      app: infinigram
   template:
     metadata:
       labels:
-        app: infinigram-api
+        app: infinigram
     spec:
       containers:
-      - name: infinigram-api
-        image: infinigram-api:latest
+      - name: infinigram
+        image: gcr.io/consus-394000/ashish/infinigram:latest
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5000
