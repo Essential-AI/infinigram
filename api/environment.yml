@@ -1,4 +1,4 @@
-name: infini-gram-api
+name: infinigram
 channels:
   - conda-forge
   - defaults

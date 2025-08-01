@@ -1,2 +1,7 @@
 [
+    {
+        "name": "v4_pileval_llama",
+        "index_dir": "/data-v4-pileval-llama/v4_pileval_llama",
+        "tokenizer": "llama"
+    }
 ]

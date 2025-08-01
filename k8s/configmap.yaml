@@ -7,9 +7,9 @@ data:
   api_config.json: |
     [
       {
-        "name": "test_index",
-        "index_dir": "/data/index",
-        "tokenizer": "gpt2"
+          "name": "v4_pileval_llama",
+          "index_dir": "/data-v4-pileval-llama/v4_pileval_llama",
+          "tokenizer": "llama"
       }
     ]
   FLASK_PORT: "5000"
