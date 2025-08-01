@@ -331,6 +331,10 @@ if args.LOG_PATH is None:
 log = open(args.LOG_PATH, 'a')
 app = Flask(__name__)
 
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'healthy'}), 200
+
 @app.route('/', methods=['POST'])
 def query():
     data = request.json

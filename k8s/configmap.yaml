@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infinigram-config
+  namespace: default
+data:
+  api_config.json: |
+    {
+      "index_dir": "/data/index",
+      "tokenizer": "gpt2"
+    }
+  FLASK_PORT: "5000"
+  MODE: "api"
+  MAX_QUERY_CHARS: "1000"
+  MAX_QUERY_TOKENS: "500"
+  MAX_CLAUSES_PER_CNF: "4"
+  MAX_TERMS_PER_CLAUSE: "4"
+  MAX_SUPPORT: "1000"
+  MAX_CLAUSE_FREQ: "500000"
+  MAX_DIFF_TOKENS: "1000"
+  MAXNUM: "10"
+  MAX_DISP_LEN: "10000" 
