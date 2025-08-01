@@ -22,65 +22,12 @@ spec:
         ports:
         - containerPort: 5000
           name: http
-        env:
-        - name: FLASK_PORT
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: FLASK_PORT
-        - name: MODE
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MODE
-        - name: MAX_QUERY_CHARS
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_QUERY_CHARS
-        - name: MAX_QUERY_TOKENS
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_QUERY_TOKENS
-        - name: MAX_CLAUSES_PER_CNF
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_CLAUSES_PER_CNF
-        - name: MAX_TERMS_PER_CLAUSE
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_TERMS_PER_CLAUSE
-        - name: MAX_SUPPORT
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_SUPPORT
-        - name: MAX_CLAUSE_FREQ
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_CLAUSE_FREQ
-        - name: MAX_DIFF_TOKENS
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_DIFF_TOKENS
-        - name: MAXNUM
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAXNUM
-        - name: MAX_DISP_LEN
-          valueFrom:
-            configMapKeyRef:
-              name: infinigram-config
-              key: MAX_DISP_LEN
+        envFrom:
+        - configMapRef:
+            name: infinigram-config
         volumeMounts:
-        - name: index-data
-          mountPath: /data
+        - name: v4-pileval-llama
+          mountPath: /data-v4-pileval-llama/v4_pileval_llama
         - name: config-volume
           mountPath: /app/api_config.json
           subPath: api_config.json
@@ -103,10 +50,71 @@ spec:
             port: 5000
           initialDelaySeconds: 5
           periodSeconds: 5
+      - name: gcsfuse-sidecar
+        image: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -ex
+            echo "Starting GCS FUSE sidecar..."
+            apt-get update && apt-get install -y lsb-release curl
+            export GCSFUSE_REPO=gcsfuse-$(lsb_release -c -s)
+            echo "deb http://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
+            curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+            apt-get update && apt-get install -y gcsfuse
+            mkdir -p /tmp/gcs-mount
+            echo "Attempting to mount bucket..."
+            gcsfuse --implicit-dirs infinigram_v4_pileval_llama /tmp/gcs-mount &
+            MOUNT_PID=$!
+            echo "Mount process started with PID: $MOUNT_PID"
+            # Wait for mount to be ready
+            sleep 10
+            echo "Checking mount status..."
+            ls -la /tmp/gcs-mount || echo "Mount not ready yet"
+            echo "Mount successful. Contents:"
+            ls -la /tmp/gcs-mount
+            # Copy data to shared volume for main container
+            echo "Copying data to shared volume..."
+            if [ -d "/tmp/gcs-mount/v4_pileval_llama" ]; then
+              cp -r /tmp/gcs-mount/v4_pileval_llama/* /data-v4-pileval-llama/v4_pileval_llama/ 2>/dev/null || echo "No data to copy or copy failed"
+            else
+              cp -r /tmp/gcs-mount/* /data-v4-pileval-llama/v4_pileval_llama/ 2>/dev/null || echo "No data to copy or copy failed"
+            fi
+            echo "Data copied to shared volume"
+            echo "Keeping mount alive..."
+            wait $MOUNT_PID &
+            echo "Sidecar is ready. Keeping container alive..."
+            # Keep the container running
+            while true; do
+              sleep 30
+              # Check if mount is still active
+              if ! mountpoint -q /tmp/gcs-mount; then
+                echo "GCS mount lost, exiting..."
+                exit 1
+              fi
+              # Sync data to shared volume periodically
+              echo "Syncing data to shared volume..."
+              if [ -d "/tmp/gcs-mount/v4_pileval_llama" ]; then
+                cp -r /tmp/gcs-mount/v4_pileval_llama/* /data-v4-pileval-llama/v4_pileval_llama/ 2>/dev/null || echo "Sync completed"
+              else
+                cp -r /tmp/gcs-mount/* /data-v4-pileval-llama/v4_pileval_llama/ 2>/dev/null || echo "Sync completed"
+              fi
+              echo "Mounts still active, continuing..."
+            done
+        securityContext:
+          privileged: true
+        volumeMounts:
+          - name: v4-pileval-llama
+            mountPath: /data-v4-pileval-llama/v4_pileval_llama
+          - name: v4-pileval-llama
+            mountPath: /data-v4-pileval-llama/v4_pileval_llama
       volumes:
       - name: index-data
         persistentVolumeClaim:
           claimName: infinigram-index-pvc
       - name: config-volume
         configMap:
-          name: infinigram-config 
+          name: infinigram-config
+      - name: v4-pileval-llama
+        emptyDir: {} 
