@@ -1,4 +1,4 @@
-name: infini-gram-pkg
+name: infinigram-pkg
 channels:
   - conda-forge
   - defaults

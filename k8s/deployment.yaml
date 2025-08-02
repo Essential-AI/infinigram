@@ -18,7 +18,8 @@ spec:
       containers:
       - name: infinigram
         image: gcr.io/consus-394000/ashish/infinigram:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
+        command: ["python3", "api/api_server.py", "--FLASK_PORT=5000", "--MODE=api", "--CONFIG_FILE=/app/api_config.json"]
         ports:
         - containerPort: 5000
           name: http

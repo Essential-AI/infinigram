@@ -1,5 +1,5 @@
 [project]
-name = "infini-gram"
+name = "infinigram"
 dynamic = [
     "version",
     "description",
