@@ -1,4 +1,5 @@
 import argparse
+import logging
 from flask import Flask, jsonify, request
 from flask_restx import Api, Resource, fields
 import json
@@ -408,6 +409,17 @@ if args.LOG_PATH is None:
 
 log = open(args.LOG_PATH, 'a')
 
+# Setup logging to both file and stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(args.LOG_PATH),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # Initialize Flask app with Swagger documentation
 app = Flask(__name__)
 api = Api(app, 
@@ -468,11 +480,9 @@ class Query(Resource):
             "method": "POST",
             "data": data
         }
-        print(f"[{request_id}] Request: {json.dumps(data)}")
+        logger.info(f"[{request_id}] Request: {json.dumps(data)}")
         log.write(json.dumps(log_entry) + '\n')
         log.flush()
-        # Also print to stdout for kubectl logs visibility
-        print(f"[LOG] {json.dumps(log_entry)}")
 
         index = data.get('corpus') or data.get('index')
         if DOLMA_API_URL is not None:
@@ -651,11 +661,9 @@ class Query(Resource):
             "status_code": 200,
             "data": result
         }
-        print(f"[{request_id}] Response: {json.dumps(result)}")
+        logger.info(f"[{request_id}] Response: {json.dumps(result)}")
         log.write(json.dumps(log_entry) + '\n')
         log.flush()
-        # Also print to stdout for kubectl logs visibility
-        print(f"[LOG] {json.dumps(log_entry)}")
         
         return result, 200
 
@@ -675,11 +683,9 @@ def legacy_query():
         "method": "POST",
         "data": data
     }
-    print(f"[{request_id}] Legacy Request: {json.dumps(data)}")
+    logger.info(f"[{request_id}] Legacy Request: {json.dumps(data)}")
     log.write(json.dumps(log_entry) + '\n')
     log.flush()
-    # Also print to stdout for kubectl logs visibility
-    print(f"[LOG] {json.dumps(log_entry)}")
     
     # Call the Query().post() method directly
     try:
@@ -695,11 +701,9 @@ def legacy_query():
             "status_code": 200,
             "data": response
         }
-        print(f"[{request_id}] Legacy Response: {json.dumps(response)}")
+        logger.info(f"[{request_id}] Legacy Response: {json.dumps(response)}")
         log.write(json.dumps(log_entry) + '\n')
         log.flush()
-        # Also print to stdout for kubectl logs visibility
-        print(f"[LOG] {json.dumps(log_entry)}")
         
         return response
     except Exception as e:
@@ -713,22 +717,7 @@ def legacy_query():
             "status_code": 500,
             "data": error_response
         }
-        print(f"[{request_id}] Legacy Error Response: {json.dumps(error_response)}")
-        log.write(json.dumps(log_entry) + '\n')
-        log.flush()
-        return error_response, 500
-    except Exception as e:
-        error_response = {'error': f'[Flask] Legacy endpoint error: {e}'}
-        log_entry = {
-            "timestamp": time.time(),
-            "request_id": request_id,
-            "type": "response",
-            "endpoint": "/",
-            "method": "POST",
-            "status_code": 500,
-            "data": error_response
-        }
-        print(f"[{request_id}] Legacy Error Response: {json.dumps(error_response)}")
+        logger.error(f"[{request_id}] Legacy Error Response: {json.dumps(error_response)}")
         log.write(json.dumps(log_entry) + '\n')
         log.flush()
         return error_response, 500
