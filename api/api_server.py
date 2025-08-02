@@ -437,7 +437,7 @@ query_model = api.model('Query', {
 response_model = api.model('Response', {
     'result': fields.Raw(description='Query result'),
     'latency': fields.Float(description='Query latency in milliseconds'),
-    'token_ids': fields.List(fields.Integer, description='Token IDs used in query'),
+    'token_ids': fields.Raw(description='Token IDs used in query (list for simple queries, nested list for CNF queries)'),
     'tokens': fields.Raw(description='Tokens corresponding to token IDs'),
     'error': fields.String(description='Error message if query failed')
 })
@@ -457,19 +457,73 @@ class Query(Resource):
     def post(self):
         """Execute a query against the InfiniGram engine"""
         data = request.json
-        print(data)
-        log.write(json.dumps(data) + '\n')
+        
+        # Log request
+        request_id = f"req_{int(time.time() * 1000)}"
+        log_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "type": "request",
+            "endpoint": "/api/query",
+            "method": "POST",
+            "data": data
+        }
+        print(f"[{request_id}] Request: {json.dumps(data)}")
+        log.write(json.dumps(log_entry) + '\n')
         log.flush()
+        # Also print to stdout for kubectl logs visibility
+        print(f"[LOG] {json.dumps(log_entry)}")
 
         index = data.get('corpus') or data.get('index')
         if DOLMA_API_URL is not None:
             try:
                 response = requests.post(DOLMA_API_URL, json=data, timeout=30)
+                
+                # Log DOLMA API response
+                log_entry = {
+                    "timestamp": time.time(),
+                    "request_id": request_id,
+                    "type": "response",
+                    "endpoint": "/api/query",
+                    "method": "POST",
+                    "status_code": response.status_code,
+                    "data": response.json()
+                }
+                print(f"[{request_id}] DOLMA Response: {json.dumps(response.json())}")
+                log.write(json.dumps(log_entry) + '\n')
+                log.flush()
+                
+                return response.json(), response.status_code
             except requests.exceptions.Timeout:
-                return {'error': f'[Flask] Web request timed out. Please try again later.'}, 500
+                error_response = {'error': f'[Flask] Web request timed out. Please try again later.'}
+                log_entry = {
+                    "timestamp": time.time(),
+                    "request_id": request_id,
+                    "type": "response",
+                    "endpoint": "/api/query",
+                    "method": "POST",
+                    "status_code": 500,
+                    "data": error_response
+                }
+                print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+                log.write(json.dumps(log_entry) + '\n')
+                log.flush()
+                return error_response, 500
             except requests.exceptions.RequestException as e:
-                return {'error': f'[Flask] Web request error: {e}'}, 500
-            return response.json(), response.status_code
+                error_response = {'error': f'[Flask] Web request error: {e}'}
+                log_entry = {
+                    "timestamp": time.time(),
+                    "request_id": request_id,
+                    "type": "response",
+                    "endpoint": "/api/query",
+                    "method": "POST",
+                    "status_code": 500,
+                    "data": error_response
+                }
+                print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+                log.write(json.dumps(log_entry) + '\n')
+                log.flush()
+                return error_response, 500
 
         try:
             query_type = data['query_type']
@@ -478,7 +532,20 @@ class Query(Resource):
                 if key in data:
                     del data[key]
             if ('query' not in data and 'query_ids' not in data) or ('query' in data and 'query_ids' in data):
-                return {'error': f'[Flask] Exactly one of query and query_ids must be present!'}, 400
+                error_response = {'error': f'[Flask] Exactly one of query and query_ids must be present!'}
+                log_entry = {
+                    "timestamp": time.time(),
+                    "request_id": request_id,
+                    "type": "response",
+                    "endpoint": "/api/query",
+                    "method": "POST",
+                    "status_code": 400,
+                    "data": error_response
+                }
+                print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+                log.write(json.dumps(log_entry) + '\n')
+                log.flush()
+                return error_response, 400
             if 'query' in data:
                 query = data['query']
                 query_ids = None
@@ -488,30 +555,183 @@ class Query(Resource):
                 query_ids = data['query_ids']
                 del data['query_ids']
         except KeyError as e:
-            return {'error': f'[Flask] Missing required field: {e}'}, 400
+            error_response = {'error': f'[Flask] Missing required field: {e}'}
+            log_entry = {
+                "timestamp": time.time(),
+                "request_id": request_id,
+                "type": "response",
+                "endpoint": "/api/query",
+                "method": "POST",
+                "status_code": 400,
+                "data": error_response
+            }
+            print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+            log.write(json.dumps(log_entry) + '\n')
+            log.flush()
+            return error_response, 400
 
         try:
             processor = PROCESSOR_BY_INDEX[index]
         except KeyError:
             if not PROCESSOR_BY_INDEX:
-                return {'error': f'[Flask] No processors available. Index data may be missing.'}, 503
-            return {'error': f'[Flask] Invalid index: {index}'}, 400
+                error_response = {'error': f'[Flask] No processors available. Index data may be missing.'}
+                log_entry = {
+                    "timestamp": time.time(),
+                    "request_id": request_id,
+                    "type": "response",
+                    "endpoint": "/api/query",
+                    "method": "POST",
+                    "status_code": 503,
+                    "data": error_response
+                }
+                print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+                log.write(json.dumps(log_entry) + '\n')
+                log.flush()
+                return error_response, 503
+            error_response = {'error': f'[Flask] Invalid index: {index}'}
+            log_entry = {
+                "timestamp": time.time(),
+                "request_id": request_id,
+                "type": "response",
+                "endpoint": "/api/query",
+                "method": "POST",
+                "status_code": 400,
+                "data": error_response
+            }
+            print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+            log.write(json.dumps(log_entry) + '\n')
+            log.flush()
+            return error_response, 400
         if not hasattr(processor, query_type):
-            return {'error': f'[Flask] Invalid query_type: {query_type}'}, 400
+            error_response = {'error': f'[Flask] Invalid query_type: {query_type}'}
+            log_entry = {
+                "timestamp": time.time(),
+                "request_id": request_id,
+                "type": "response",
+                "endpoint": "/api/query",
+                "method": "POST",
+                "status_code": 400,
+                "data": error_response
+            }
+            print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+            log.write(json.dumps(log_entry) + '\n')
+            log.flush()
+            return error_response, 400
 
         try:
             result = processor.process(query_type, query, query_ids, **data)
         except Exception as e:
             exc_type, exc_value, exc_traceback = sys.exc_info()
             traceback.print_exception(exc_type, exc_value, exc_traceback)
-            return {'error': f'[Flask] Internal server error: {e}'}, 500
+            error_response = {'error': f'[Flask] Internal server error: {e}'}
+            
+            # Log error response
+            log_entry = {
+                "timestamp": time.time(),
+                "request_id": request_id,
+                "type": "response",
+                "endpoint": "/api/query",
+                "method": "POST",
+                "status_code": 500,
+                "data": error_response
+            }
+            print(f"[{request_id}] Error Response: {json.dumps(error_response)}")
+            log.write(json.dumps(log_entry) + '\n')
+            log.flush()
+            
+            return error_response, 500
+        
+        # Log successful response
+        log_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "type": "response",
+            "endpoint": "/api/query",
+            "method": "POST",
+            "status_code": 200,
+            "data": result
+        }
+        print(f"[{request_id}] Response: {json.dumps(result)}")
+        log.write(json.dumps(log_entry) + '\n')
+        log.flush()
+        # Also print to stdout for kubectl logs visibility
+        print(f"[LOG] {json.dumps(log_entry)}")
+        
         return result, 200
 
 # Legacy endpoint for backward compatibility
 @app.route('/', methods=['POST'])
 def legacy_query():
     """Legacy endpoint - redirects to /api/query"""
-    return Query().post()
+    data = request.json
+    
+    # Log request for legacy endpoint
+    request_id = f"req_{int(time.time() * 1000)}"
+    log_entry = {
+        "timestamp": time.time(),
+        "request_id": request_id,
+        "type": "request",
+        "endpoint": "/",
+        "method": "POST",
+        "data": data
+    }
+    print(f"[{request_id}] Legacy Request: {json.dumps(data)}")
+    log.write(json.dumps(log_entry) + '\n')
+    log.flush()
+    # Also print to stdout for kubectl logs visibility
+    print(f"[LOG] {json.dumps(log_entry)}")
+    
+    # Call the Query().post() method directly
+    try:
+        response = Query().post()
+        
+        # Log successful legacy response
+        log_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "type": "response",
+            "endpoint": "/",
+            "method": "POST",
+            "status_code": 200,
+            "data": response
+        }
+        print(f"[{request_id}] Legacy Response: {json.dumps(response)}")
+        log.write(json.dumps(log_entry) + '\n')
+        log.flush()
+        # Also print to stdout for kubectl logs visibility
+        print(f"[LOG] {json.dumps(log_entry)}")
+        
+        return response
+    except Exception as e:
+        error_response = {'error': f'[Flask] Legacy endpoint error: {e}'}
+        log_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "type": "response",
+            "endpoint": "/",
+            "method": "POST",
+            "status_code": 500,
+            "data": error_response
+        }
+        print(f"[{request_id}] Legacy Error Response: {json.dumps(error_response)}")
+        log.write(json.dumps(log_entry) + '\n')
+        log.flush()
+        return error_response, 500
+    except Exception as e:
+        error_response = {'error': f'[Flask] Legacy endpoint error: {e}'}
+        log_entry = {
+            "timestamp": time.time(),
+            "request_id": request_id,
+            "type": "response",
+            "endpoint": "/",
+            "method": "POST",
+            "status_code": 500,
+            "data": error_response
+        }
+        print(f"[{request_id}] Legacy Error Response: {json.dumps(error_response)}")
+        log.write(json.dumps(log_entry) + '\n')
+        log.flush()
+        return error_response, 500
 
 @app.route('/health', methods=['GET'])
 def legacy_health():
