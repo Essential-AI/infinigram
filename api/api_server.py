@@ -1,5 +1,6 @@
 import argparse
 from flask import Flask, jsonify, request
+from flask_restx import Api, Resource, fields
 import json
 import os
 import requests
@@ -37,11 +38,13 @@ class Processor:
     def __init__(self, config):
         assert 'index_dir' in config and 'tokenizer' in config
 
+        self.config = config
         self.tokenizer_type = config['tokenizer']
         if self.tokenizer_type == 'gpt2':
             self.tokenizer = AutoTokenizer.from_pretrained('gpt2', add_bos_token=False, add_eos_token=False)
         elif self.tokenizer_type == 'llama':
-            self.tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf", add_bos_token=False, add_eos_token=False)
+            # Use a different Llama tokenizer that doesn't require authentication
+            self.tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer", add_bos_token=False, add_eos_token=False)
         elif self.tokenizer_type == 'olmo':
             self.tokenizer = AutoTokenizer.from_pretrained("allenai/OLMo-7B-hf", add_bos_token=False, add_eos_token=False)
         elif self.tokenizer_type == 'gptneox':
@@ -49,12 +52,35 @@ class Processor:
         else:
             raise NotImplementedError
 
-        global prev_shards_by_index_dir
-        self.engine = InfiniGramEngine(index_dir=config['index_dir'], eos_token_id=self.tokenizer.eos_token_id, ds_prefetch_depth=0, sa_prefetch_depth=0, od_prefetch_depth=0, prev_shards_by_index_dir=prev_shards_by_index_dir)
-        prev_shards_by_index_dir = {
-            **prev_shards_by_index_dir,
-            **self.engine.get_new_shards_by_index_dir(),
-        }
+        # Check if index directory exists
+        index_dir = config['index_dir']
+        if not os.path.exists(index_dir):
+            print(f"Warning: Index directory {index_dir} does not exist. Creating dummy engine.")
+            self.engine = None
+            return
+
+        # Check if index files exist
+        required_files = ['tokenized.0', 'table.0', 'offset.0']
+        missing_files = []
+        for file in required_files:
+            if not os.path.exists(os.path.join(index_dir, file)):
+                missing_files.append(file)
+        
+        if missing_files:
+            print(f"Warning: Missing required index files in {index_dir}: {missing_files}")
+            self.engine = None
+            return
+
+        try:
+            global prev_shards_by_index_dir
+            self.engine = InfiniGramEngine(index_dir=index_dir, eos_token_id=self.tokenizer.eos_token_id, ds_prefetch_depth=0, sa_prefetch_depth=0, od_prefetch_depth=0, prev_shards_by_index_dir=prev_shards_by_index_dir)
+            prev_shards_by_index_dir = {
+                **prev_shards_by_index_dir,
+                **self.engine.get_new_shards_by_index_dir(),
+            }
+        except Exception as e:
+            print(f"Warning: Failed to initialize engine for {index_dir}: {e}")
+            self.engine = None
 
     def tokenize(self, query):
         if self.tokenizer_type == 'gpt2':
@@ -119,6 +145,33 @@ class Processor:
             is_cnf = True
         else:
             return {'error': f'query_ids must be a list of integers, or a triply-nested list of integers!'}
+
+        # Check if engine is available
+        if self.engine is None:
+            # Try to reinitialize the engine if it wasn't available before
+            try:
+                index_dir = self.config['index_dir']
+                if os.path.exists(index_dir):
+                    required_files = ['tokenized.0', 'table.0', 'offset.0']
+                    missing_files = []
+                    for file in required_files:
+                        if not os.path.exists(os.path.join(index_dir, file)):
+                            missing_files.append(file)
+                    
+                    if not missing_files:
+                        global prev_shards_by_index_dir
+                        self.engine = InfiniGramEngine(index_dir=index_dir, eos_token_id=self.tokenizer.eos_token_id, ds_prefetch_depth=0, sa_prefetch_depth=0, od_prefetch_depth=0, prev_shards_by_index_dir=prev_shards_by_index_dir)
+                        prev_shards_by_index_dir = {
+                            **prev_shards_by_index_dir,
+                            **self.engine.get_new_shards_by_index_dir(),
+                        }
+                        print(f"Engine reinitialized for {index_dir}")
+                    else:
+                        return {'error': f'Engine not available for this index. Missing files: {missing_files}'}
+                else:
+                    return {'error': f'Engine not available for this index. Index directory does not exist.'}
+            except Exception as e:
+                return {'error': f'Engine not available for this index. Failed to initialize: {e}'}
 
         start_time = time.time()
         if is_cnf and query_type in ['count', 'search_docs']:
@@ -320,70 +373,150 @@ class Processor:
         return result
 
 PROCESSOR_BY_INDEX = {}
-with open(args.CONFIG_FILE) as f:
-    configs = json.load(f)
-    for config in configs:
-        PROCESSOR_BY_INDEX[config['name']] = Processor(config)
+
+def initialize_processors():
+    global PROCESSOR_BY_INDEX
+    try:
+        with open(args.CONFIG_FILE) as f:
+            configs = json.load(f)
+            for config in configs:
+                try:
+                    PROCESSOR_BY_INDEX[config['name']] = Processor(config)
+                except Exception as e:
+                    print(f"Warning: Failed to initialize processor for {config['name']}: {e}")
+                    # Continue with other processors
+    except Exception as e:
+        print(f"Warning: Failed to load config file: {e}")
+        # Continue without any processors
+    
+    print(f"Initialized {len(PROCESSOR_BY_INDEX)} processors")
+
+# Start processor initialization in background
+import threading
+processor_thread = threading.Thread(target=initialize_processors)
+processor_thread.daemon = True
+processor_thread.start()
+
+# Wait for processor initialization to complete
+print("Waiting for processor initialization...")
+processor_thread.join(timeout=60)
+print(f"Processor initialization completed. {len(PROCESSOR_BY_INDEX)} processors available.")
 
 # save log under home directory
 if args.LOG_PATH is None:
-    args.LOG_PATH = f'/home/ubuntu/logs/flask_{args.MODE}.log'
+    args.LOG_PATH = f'/tmp/flask_{args.MODE}.log'
+
 log = open(args.LOG_PATH, 'a')
+
+# Initialize Flask app with Swagger documentation
 app = Flask(__name__)
+api = Api(app, 
+    title='InfiniGram API',
+    version='1.0',
+    description='A REST API for n-gram search and language model analysis',
+    doc='/docs/'
+)
+
+# Define namespaces
+ns = api.namespace('api', description='InfiniGram API operations')
+
+# Define models for Swagger documentation
+query_model = api.model('Query', {
+    'query_type': fields.String(required=True, description='Type of query (count, prob, ntd, infgram_prob, infgram_ntd, search_docs, find)', 
+                               enum=['count', 'prob', 'ntd', 'infgram_prob', 'infgram_ntd', 'search_docs', 'find']),
+    'index': fields.String(required=True, description='Index name to query'),
+    'query': fields.String(description='Text query (mutually exclusive with query_ids)'),
+    'query_ids': fields.List(fields.Integer, description='Token IDs query (mutually exclusive with query)'),
+    'max_support': fields.Integer(description='Maximum number of support items for ntd queries'),
+    'maxnum': fields.Integer(description='Maximum number of results for search_docs'),
+    'max_disp_len': fields.Integer(description='Maximum display length for search results'),
+    'max_clause_freq': fields.Integer(description='Maximum clause frequency for CNF queries'),
+    'max_diff_tokens': fields.Integer(description='Maximum different tokens for CNF queries')
+})
+
+response_model = api.model('Response', {
+    'result': fields.Raw(description='Query result'),
+    'latency': fields.Float(description='Query latency in milliseconds'),
+    'token_ids': fields.List(fields.Integer, description='Token IDs used in query'),
+    'tokens': fields.Raw(description='Tokens corresponding to token IDs'),
+    'error': fields.String(description='Error message if query failed')
+})
+
+@ns.route('/health')
+class Health(Resource):
+    @api.doc('get_health')
+    def get(self):
+        """Get API health status"""
+        return {'status': 'healthy'}, 200
+
+@ns.route('/query')
+class Query(Resource):
+    @api.doc('post_query')
+    @api.expect(query_model)
+    @api.marshal_with(response_model, code=200)
+    def post(self):
+        """Execute a query against the InfiniGram engine"""
+        data = request.json
+        print(data)
+        log.write(json.dumps(data) + '\n')
+        log.flush()
+
+        index = data.get('corpus') or data.get('index')
+        if DOLMA_API_URL is not None:
+            try:
+                response = requests.post(DOLMA_API_URL, json=data, timeout=30)
+            except requests.exceptions.Timeout:
+                return {'error': f'[Flask] Web request timed out. Please try again later.'}, 500
+            except requests.exceptions.RequestException as e:
+                return {'error': f'[Flask] Web request error: {e}'}, 500
+            return response.json(), response.status_code
+
+        try:
+            query_type = data['query_type']
+            index = data.get('corpus') or data['index']
+            for key in ['query_type', 'corpus', 'index', 'engine', 'source', 'timestamp']:
+                if key in data:
+                    del data[key]
+            if ('query' not in data and 'query_ids' not in data) or ('query' in data and 'query_ids' in data):
+                return {'error': f'[Flask] Exactly one of query and query_ids must be present!'}, 400
+            if 'query' in data:
+                query = data['query']
+                query_ids = None
+                del data['query']
+            else:
+                query = None
+                query_ids = data['query_ids']
+                del data['query_ids']
+        except KeyError as e:
+            return {'error': f'[Flask] Missing required field: {e}'}, 400
+
+        try:
+            processor = PROCESSOR_BY_INDEX[index]
+        except KeyError:
+            if not PROCESSOR_BY_INDEX:
+                return {'error': f'[Flask] No processors available. Index data may be missing.'}, 503
+            return {'error': f'[Flask] Invalid index: {index}'}, 400
+        if not hasattr(processor, query_type):
+            return {'error': f'[Flask] Invalid query_type: {query_type}'}, 400
+
+        try:
+            result = processor.process(query_type, query, query_ids, **data)
+        except Exception as e:
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+            return {'error': f'[Flask] Internal server error: {e}'}, 500
+        return result, 200
+
+# Legacy endpoint for backward compatibility
+@app.route('/', methods=['POST'])
+def legacy_query():
+    """Legacy endpoint - redirects to /api/query"""
+    return Query().post()
 
 @app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'healthy'}), 200
+def legacy_health():
+    """Legacy health endpoint - redirects to /api/health"""
+    return Health().get()
 
-@app.route('/', methods=['POST'])
-def query():
-    data = request.json
-    print(data)
-    log.write(json.dumps(data) + '\n')
-    log.flush()
-
-    index = data['corpus'] if 'corpus' in data else (data['index'] if 'index' in data else None)
-    if DOLMA_API_URL is not None:
-        try:
-            response = requests.post(DOLMA_API_URL, json=data, timeout=30)
-        except requests.exceptions.Timeout:
-            return jsonify({'error': f'[Flask] Web request timed out. Please try again later.'}), 500
-        except requests.exceptions.RequestException as e:
-            return jsonify({'error': f'[Flask] Web request error: {e}'}), 500
-        return jsonify(response.json()), response.status_code
-
-    try:
-        query_type = data['query_type']
-        index = data['corpus'] if 'corpus' in data else data['index']
-        for key in ['query_type', 'corpus', 'index', 'engine', 'source', 'timestamp']:
-            if key in data:
-                del data[key]
-        if ('query' not in data and 'query_ids' not in data) or ('query' in data and 'query_ids' in data):
-            return jsonify({'error': f'[Flask] Exactly one of query and query_ids must be present!'}), 400
-        if 'query' in data:
-            query = data['query']
-            query_ids = None
-            del data['query']
-        else:
-            query = None
-            query_ids = data['query_ids']
-            del data['query_ids']
-    except KeyError as e:
-        return jsonify({'error': f'[Flask] Missing required field: {e}'}), 400
-
-    try:
-        processor = PROCESSOR_BY_INDEX[index]
-    except KeyError:
-        return jsonify({'error': f'[Flask] Invalid index: {index}'}), 400
-    if not hasattr(processor.engine, query_type):
-        return jsonify({'error': f'[Flask] Invalid query_type: {query_type}'}), 400
-
-    try:
-        result = processor.process(query_type, query, query_ids, **data)
-    except Exception as e:
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        traceback.print_exception(exc_type, exc_value, exc_traceback)
-        return jsonify({'error': f'[Flask] Internal server error: {e}'}), 500
-    return jsonify(result), 200
-
-app.run(host='0.0.0.0', port=args.FLASK_PORT, threaded=False, processes=10)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=args.FLASK_PORT, threaded=False, processes=10)

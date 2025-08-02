@@ -23,7 +23,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install Python dependencies
 RUN pip3 install --upgrade pip && \
-    pip3 install transformers==4.40.2 flask pybind11
+    pip3 install transformers==4.40.2 flask flask-restx pybind11
 
 # Copy the package code
 COPY pkg/ ./pkg/
@@ -43,8 +43,12 @@ COPY api/ ./api/
 # Set environment variables
 ENV PYTHONPATH=/app/pkg
 
-# Create data directory
-RUN mkdir -p /data
+# Create data directory and log directory
+RUN mkdir -p /data && \
+    mkdir -p /home/ubuntu/logs && \
+    touch /home/ubuntu/logs/flask_api.log && \
+    chmod 777 /home/ubuntu/logs && \
+    chmod 666 /home/ubuntu/logs/flask_api.log
 
 # Add health check endpoint to the API server
 RUN echo 'import sys; sys.path.append("../pkg"); from infini_gram.engine import InfiniGramEngine' > /tmp/health_check.py
