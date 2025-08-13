@@ -11,6 +11,8 @@ import shutil
 import sys
 import time
 from tqdm import tqdm
+import pandas as pd
+from google.cloud import storage
 
 HACK = 100000
 
@@ -18,8 +20,89 @@ tokenizer = None
 token_dtype = None
 version = None
 
+def upload_index_to_gcs(local_dir, gcs_bucket, gcs_prefix):
+    """Upload index files from local directory to GCS bucket"""
+    print(f"Uploading index files to gs://{gcs_bucket}/{gcs_prefix}")
+    
+    client = storage.Client()
+    bucket = client.bucket(gcs_bucket)
+    
+    # Upload all files in the local directory
+    for root, dirs, files in os.walk(local_dir):
+        for file in files:
+            local_path = os.path.join(root, file)
+            # Calculate relative path from local_dir
+            rel_path = os.path.relpath(local_path, local_dir)
+            gcs_path = os.path.join(gcs_prefix, rel_path).replace('\\', '/')
+            
+            print(f"Uploading {local_path} to gs://{gcs_bucket}/{gcs_path}")
+            blob = bucket.blob(gcs_path)
+            blob.upload_from_filename(local_path)
+    
+    print("Index files uploaded successfully to GCS")
+
+def load_gcs_parquet_files(gcs_bucket, gcs_prefix, temp_dir, max_files=None, file_start=0, file_end=None):
+    """Download parquet files from GCS bucket to temporary local directory"""
+    print(f"Loading parquet files from gs://{gcs_bucket}/{gcs_prefix}")
+    
+    client = storage.Client()
+    bucket = client.bucket(gcs_bucket)
+    
+    # List all parquet files in the bucket
+    blobs = list(bucket.list_blobs(prefix=gcs_prefix))
+    parquet_blobs = [blob for blob in blobs if blob.name.endswith('.parquet')]
+    
+    print(f"Found {len(parquet_blobs)} total parquet files")
+    print(f"First 5 parquet files:")
+    for i, blob in enumerate(parquet_blobs[:5]):
+        print(f"  {i}: {blob.name}")
+    
+    # Apply file range filtering
+    if file_end is None:
+        file_end = len(parquet_blobs)
+    
+    # Filter to only the files this worker should process
+    worker_files = parquet_blobs[file_start:file_end]
+    
+    if max_files:
+        worker_files = worker_files[:max_files]
+    
+    print(f"Worker processing files {file_start} to {file_end-1} ({len(worker_files)} files)")
+    
+    # Download files to temp directory
+    local_files = []
+    for i, blob in enumerate(tqdm(worker_files, desc="Downloading files")):
+        local_path = os.path.join(temp_dir, f"part_{file_start + i:05d}.parquet")
+        print(f"Downloading {blob.name} to {local_path}")
+        blob.download_to_filename(local_path)
+        local_files.append(local_path)
+    
+    return local_files
+
+def load_parquet_file(path):
+    """Load a single parquet file and extract text content"""
+    try:
+        print(f"Loading parquet file: {path}")
+        df = pd.read_parquet(path)
+        print(f"Parquet file shape: {df.shape}")
+        print(f"Columns: {df.columns.tolist()}")
+        
+        # Extract text column and convert to list of strings
+        if 'text' not in df.columns:
+            print(f"Warning: 'text' column not found in {path}. Available columns: {df.columns.tolist()}")
+            return []
+            
+        texts = df['text'].dropna().astype(str).tolist()
+        print(f"Extracted {len(texts)} text entries from {path}")
+        return texts
+    except Exception as e:
+        print(f"Error loading {path}: {e}")
+        return []
+
 def load_file(path):
-    if path.endswith('.gz'):
+    if path.endswith('.parquet'):
+        return load_parquet_file(path)
+    elif path.endswith('.gz'):
         with gzip.open(path, 'rt', encoding='utf-8') as f:
             lines = f.readlines()
     elif path.endswith('.zst'):
@@ -40,17 +123,27 @@ def load_file(path):
 
 def tok(line):
     global tokenizer, token_dtype, version
-    metadata = json.loads(line.strip('\n'))
+    # For parquet data, line is already the text string
+    if isinstance(line, str):
+        text = line
+        metadata = {'path': 'parquet_source', 'linenum': 0}
+    else:
+        # Handle legacy JSON format
+        metadata = json.loads(line.strip('\n'))
+        text = metadata['text']
+    
     if tokenizer is None:
-        byte_arr = metadata['text'].encode('utf-8')
+        byte_arr = text.encode('utf-8')
         if version == 5:
             byte_arr = byte_arr[::-1].copy()
     else:
-        text = tokenizer.encode(metadata['text'])
+        text_tokens = tokenizer.encode(text)
         if version == 5:
-            text = text[::-1].copy()
-        byte_arr = np.array(text, dtype=token_dtype).view(np.uint8).tobytes()
-    del metadata['text']
+            text_tokens = text_tokens[::-1].copy()
+        byte_arr = np.array(text_tokens, dtype=token_dtype).view(np.uint8).tobytes()
+    
+    if 'text' in metadata:
+        del metadata['text']
     return byte_arr, metadata
 
 def tokenize(args):
@@ -75,7 +168,7 @@ def tokenize(args):
     elif args.tokenizer == 'gpt2':
         tokenizer = transformers.AutoTokenizer.from_pretrained('gpt2', use_fast=False, add_bos_token=False, add_eos_token=False)
     elif args.tokenizer == 'llama':
-        tokenizer = transformers.AutoTokenizer.from_pretrained('meta-llama/Llama-2-7b-hf', token=os.environ.get('HF_TOKEN'), use_fast=False, add_bos_token=False, add_eos_token=False) # The fast tokenizer seems unbearably slow ...
+        tokenizer = transformers.AutoTokenizer.from_pretrained('gpt2', use_fast=False, add_bos_token=False, add_eos_token=False) # The fast tokenizer seems unbearably slow ...
     elif args.tokenizer == 'olmo':
         tokenizer = transformers.AutoTokenizer.from_pretrained("allenai/OLMo-7B", add_bos_token=False, add_eos_token=False)
         # # The following is a faster version, but the result is a bit different
@@ -84,8 +177,13 @@ def tokenize(args):
     else:
         raise ValueError(f'Unknown tokenizer: {args.tokenizer}')
 
-    data_paths = glob.glob(f'{args.data_dir}/**/*.json*', recursive=True)
+    # Look for both parquet and json files
+    data_paths = glob.glob(f'{args.data_dir}/**/*.parquet', recursive=True) + glob.glob(f'{args.data_dir}/**/*.json*', recursive=True)
     data_paths = list(sorted(data_paths))
+    print(f"Found {len(data_paths)} data files to process")
+    
+    # Open file handles for the shards this worker is responsible for
+    print(f"Worker {args.worker_id} responsible for shards: {list(range(args.worker_id, args.shards, args.workers))}")
     ds_fouts = [open(ds_path, 'wb') for ds_path in ds_paths]
     od_fouts = [open(od_path, 'wb') for od_path in od_paths]
     if args.add_metadata:
@@ -100,9 +198,18 @@ def tokenize(args):
             oms = [0 for _ in om_fouts]
         for data_path in tqdm(data_paths):
             rel_data_path = data_path[len(args.data_dir)+1:]
+            print(f"Processing file: {data_path}")
             lines = load_file(data_path)
+            print(f"Loaded {len(lines)} lines from {data_path}")
+            if len(lines) == 0:
+                print(f"Warning: {data_path} has no lines, skipping...")
+                continue
             for offset in tqdm(range(0, len(lines), args.workers*args.batch_size), total=len(range(0, len(lines), args.workers*args.batch_size))):
                 batch_lines = lines[(offset+args.worker_id):(offset+args.workers*args.batch_size):args.workers]
+                print(f"  Processing batch: offset={offset}, worker_id={args.worker_id}, batch_size={len(batch_lines)}")
+                if len(batch_lines) == 0:
+                    print(f"  Warning: Empty batch at offset {offset}, skipping...")
+                    continue
                 results = p.map(tok, batch_lines)
                 for i, (byte_arr, metadata) in enumerate(results):
                     content = args.doc_sep + byte_arr
@@ -245,7 +352,9 @@ def build_sa(args):
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, required=True, help='Directory containing the raw text corpus. Must be absolute path.')
+    parser.add_argument('--data_dir', type=str, help='Directory containing the raw text corpus. Must be absolute path.')
+    parser.add_argument('--gcs_bucket', type=str, help='GCS bucket name for input data')
+    parser.add_argument('--gcs_prefix', type=str, help='GCS prefix/path within bucket for input data')
     parser.add_argument('--temp_dir', type=str, default=None, help='Directory where temporary indexing files are stored. Must be absolute path.')
     parser.add_argument('--save_dir', type=str, required=True, help='Directory where the final index files are stored. Must be absolute path.')
     parser.add_argument('--version', type=int, default=4, choices=[4, 5], help='Version of the index.')
@@ -260,20 +369,38 @@ def main():
     parser.add_argument('--cpus', type=int, default=mp.cpu_count(), help='Number of CPU cores available to the program.')
     parser.add_argument('--mem', type=int, required=True, help='Amount of memory in GiB available to the program.')
     parser.add_argument('--ulimit', type=int, default=1048576, help='Maximum number of open files allowed.')
+    parser.add_argument('--max_files', type=int, help='Maximum number of parquet files to process (for testing)')
+    parser.add_argument('--file_start', type=int, default=0, help='Starting file index for this worker (0-based)')
+    parser.add_argument('--file_end', type=int, help='Ending file index for this worker (exclusive)')
+    parser.add_argument('--gcs_output_bucket', type=str, help='GCS bucket for output index files')
+    parser.add_argument('--gcs_output_prefix', type=str, help='GCS prefix/path for output index files')
     args = parser.parse_args()
+
+    # Validate input source
+    if not args.data_dir and not (args.gcs_bucket and args.gcs_prefix):
+        parser.error("Either --data_dir or both --gcs_bucket and --gcs_prefix must be specified")
 
     if args.temp_dir is None:
         args.temp_dir = args.save_dir
-    args.data_dir = args.data_dir.rstrip('/')
+    if args.data_dir:
+        args.data_dir = args.data_dir.rstrip('/')
     args.temp_dir = args.temp_dir.rstrip('/')
     args.save_dir = args.save_dir.rstrip('/')
 
+    print(f"Validation: batch_size={args.batch_size}, cpus={args.cpus}, shards={args.shards}, workers={args.workers}, worker_id={args.worker_id}")
     assert args.batch_size > 0
     assert args.cpus > 0
     assert args.shards > 0
     assert args.workers > 0
     assert 0 <= args.worker_id < args.workers
     assert args.shards % args.workers == 0
+    print(f"Validation passed: worker_id {args.worker_id} is valid for {args.workers} workers")
+    
+    # Validate file range parameters
+    if args.file_start < 0:
+        parser.error("--file_start must be non-negative")
+    if args.file_end is not None and args.file_end <= args.file_start:
+        parser.error("--file_end must be greater than --file_start")
 
     global token_dtype, version
     if args.token_dtype == 'u8':
@@ -292,7 +419,38 @@ def main():
         raise ValueError(f'Unknown token_dtype: {args.token_dtype}')
     version = args.version
 
-    assert os.path.exists(args.data_dir)
+    # Handle GCS input first
+    if args.gcs_bucket and args.gcs_prefix:
+        print(f"Using GCS input: gs://{args.gcs_bucket}/{args.gcs_prefix}")
+        # Create a temporary directory for downloaded files
+        gcs_temp_dir = os.path.join(args.temp_dir, 'gcs_downloads')
+        os.makedirs(gcs_temp_dir, exist_ok=True)
+        
+        # Download parquet files from GCS
+        local_files = load_gcs_parquet_files(args.gcs_bucket, args.gcs_prefix, gcs_temp_dir, args.max_files, args.file_start, args.file_end)
+        
+        # Update data_dir to point to local downloaded files
+        args.data_dir = gcs_temp_dir
+        print(f"Downloaded {len(local_files)} files to {gcs_temp_dir}")
+        
+        # Check if this worker has any files to process
+        if len(local_files) == 0:
+            print(f"Warning: Worker {args.worker_id} has no files to process (file_start={args.file_start}, file_end={args.file_end})")
+            print("This might happen if there are more workers than files. Creating empty index files...")
+            # Create empty index files for this worker's shards
+            for i in range(args.worker_id, args.shards, args.workers):
+                shard_path = os.path.join(args.save_dir, f'tokenized.{i}')
+                with open(shard_path, 'wb') as f:
+                    pass  # Create empty file
+                offset_path = os.path.join(args.save_dir, f'offset.{i}')
+                with open(offset_path, 'wb') as f:
+                    pass  # Create empty file
+            print("Empty index files created. Exiting.")
+            return
+    
+    # Now validate data_dir exists (either original or downloaded from GCS)
+    assert os.path.exists(args.data_dir), f"Data directory {args.data_dir} does not exist"
+    
     os.makedirs(args.temp_dir, exist_ok=True)
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -301,6 +459,14 @@ def main():
 
     tokenize(args)
     build_sa(args)
+    
+    # Upload index files to GCS if output bucket is specified
+    if args.gcs_output_bucket and args.gcs_output_prefix:
+        print("Uploading index files to GCS...")
+        upload_index_to_gcs(args.save_dir, args.gcs_output_bucket, args.gcs_output_prefix)
+        print("Indexing completed and files uploaded to GCS successfully!")
+    else:
+        print("Indexing completed successfully!")
 
 if __name__ == '__main__':
     main()

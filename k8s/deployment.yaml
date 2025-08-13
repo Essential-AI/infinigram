@@ -64,6 +64,7 @@ spec:
             echo "deb http://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
             curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
             apt-get update && apt-get install -y gcsfuse
+            echo "Creating mount directory..."
             mkdir -p /tmp/gcs-mount
             echo "Attempting to mount bucket..."
             gcsfuse --implicit-dirs infinigram_v4_pileval_llama /tmp/gcs-mount &
@@ -108,12 +109,7 @@ spec:
         volumeMounts:
           - name: v4-pileval-llama
             mountPath: /data-v4-pileval-llama/v4_pileval_llama
-          - name: v4-pileval-llama
-            mountPath: /data-v4-pileval-llama/v4_pileval_llama
       volumes:
-      - name: index-data
-        persistentVolumeClaim:
-          claimName: infinigram-index-pvc
       - name: config-volume
         configMap:
           name: infinigram-config
