@@ -1,0 +1,118 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: infinigram-indexing
+  namespace: default
+spec:
+  parallelism: 16  # Scaled to 16 parallel workers
+  completions: 16  # Total number of workers to complete
+  backoffLimit: 3  # Moved to job spec level
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: indexing-worker
+        image: gcr.io/consus-394000/ashish/infinigram:latest
+        command: ["/bin/bash"]
+        args:
+        - -c
+        - |
+          set -e
+          
+          # Install GCP CLI tools first
+          apt-get update && apt-get install -y curl
+          curl -sSL https://sdk.cloud.google.com | bash
+          export PATH=$PATH:/root/google-cloud-sdk/bin
+          
+          # Install additional dependencies
+          pip install pandas pyarrow google-cloud-storage tqdm
+          
+          # Ensure Python is in PATH
+          export PATH=$PATH:/usr/local/bin
+          python3 --version || python --version
+          
+          # Set GCP credentials
+          export GOOGLE_APPLICATION_CREDENTIALS="/gcp-credentials/service-account.json"
+          
+          # Calculate worker parameters for range-based division
+          WORKER_ID=${JOB_COMPLETION_INDEX:-0}
+          if [ -z "$WORKER_ID" ] || [ "$WORKER_ID" = "0" ]; then
+            # Fallback: extract worker ID from pod name
+            WORKER_ID=$(echo $POD_NAME | grep -o '[0-9]*$' | head -1)
+            WORKER_ID=${WORKER_ID:-0}
+          fi
+          TOTAL_WORKERS=16
+          
+          echo "Using worker ID: $WORKER_ID"
+          
+          # Count total parquet files dynamically
+          echo "Counting total parquet files..."
+          TOTAL_FILES=$(gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/**/*.parquet | wc -l)
+          echo "Found $TOTAL_FILES total parquet files"
+          
+          # Calculate file range for this worker
+          FILES_PER_WORKER=$((TOTAL_FILES / TOTAL_WORKERS))
+          START_FILE=$((WORKER_ID * FILES_PER_WORKER))
+          END_FILE=$((START_FILE + FILES_PER_WORKER))
+          
+          # Last worker gets remaining files
+          if [ $WORKER_ID -eq $((TOTAL_WORKERS - 1)) ]; then
+            END_FILE=$TOTAL_FILES
+          fi
+          
+          echo "Starting indexing worker $WORKER_ID of $TOTAL_WORKERS"
+          echo "Processing files $START_FILE to $((END_FILE - 1)) (total: $((END_FILE - START_FILE)) files)"
+          
+          # Run indexing for this worker with file range
+          python3 pkg/infini_gram/indexing.py \
+            --data_dir "/tmp/indexing" \
+            --save_dir "/tmp/indexing" \
+            --temp_dir "/tmp/indexing" \
+            --version 4 \
+            --tokenizer llama \
+            --token_dtype u16 \
+            --add_metadata \
+            --add_unigram \
+            --shards 16 \
+            --workers 16 \
+            --worker_id $WORKER_ID \
+            --file_start $START_FILE \
+            --file_end $END_FILE \
+            --batch_size 65536 \
+            --cpus 4 \
+            --mem 16 \
+            --ulimit 1048576
+          
+          echo "Worker $WORKER_ID completed successfully"
+        
+        env:
+        - name: JOB_COMPLETION_INDEX
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        
+        resources:
+          requests:
+            memory: "32Gi"    # Increased for highmem nodes
+            cpu: "60"
+          limits:
+            memory: "50Gi"    # Increased for highmem nodes
+            cpu: "80"
+        
+        volumeMounts:
+        - name: gcp-credentials
+          mountPath: /gcp-credentials
+          readOnly: true
+        - name: temp-volume
+          mountPath: /tmp
+      
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-service-account-secret
+      - name: temp-volume
+        emptyDir: {} 
