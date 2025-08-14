@@ -1,15 +1,24 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: infinigram-indexing
+  name: infinigram-index
   namespace: ashish
 spec:
-  parallelism: 128  # Scaled to 16 parallel workers
-  completions: 128  # Total number of workers to complete
-  backoffLimit: 5  # Moved to job spec level
+  backoffLimit: 50
+  completions: 64
+  parallelism: 64
   template:
     spec:
       restartPolicy: Never
+      tolerations:
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
       containers:
       - name: indexing-worker
         image: gcr.io/consus-394000/ashish/infinigram:latest
@@ -59,7 +68,7 @@ spec:
             WORKER_ID=$(echo $POD_NAME | grep -o '[0-9]*$' | head -1)
             WORKER_ID=${WORKER_ID:-0}
           fi
-          TOTAL_WORKERS=128
+          TOTAL_WORKERS=64
           
           # Ensure worker ID is within valid range [0, TOTAL_WORKERS-1]
           WORKER_ID=$((WORKER_ID % TOTAL_WORKERS))
@@ -152,9 +161,9 @@ spec:
           if [ $START_FILE -ge $TOTAL_FILES ]; then
             echo "Worker $WORKER_ID has no files to process. Creating empty index files..."
             # Create empty index files for this worker's shards
-            SHARDS=128
-            echo "Worker $WORKER_ID responsible for shards: $(seq $WORKER_ID $TOTAL_WORKERS $((SHARDS - 1)))"
-            for i in $(seq $WORKER_ID $TOTAL_WORKERS $((SHARDS - 1))); do
+            SHARDS=64
+            echo "Worker $WORKER_ID responsible for shards: $(seq $WORKER_ID $TOTAL_WORKERS $((64 - 1)))"
+            for i in $(seq $WORKER_ID $TOTAL_WORKERS $((64 - 1))); do
               echo "Creating empty index file for shard $i"
               touch "/tmp/indexing/tokenized.$i"
               touch "/tmp/indexing/offset.$i"
@@ -162,7 +171,7 @@ spec:
             echo "Empty index files created. Worker $WORKER_ID completed."
           else
             echo "Worker $WORKER_ID has files to process. Running indexing..."
-            echo "Command: python3 pkg/infini_gram/indexing.py --gcs_bucket consus-dataproc --gcs_prefix ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged --data_dir /tmp/indexing --save_dir /tmp/indexing --temp_dir /tmp/indexing --version 4 --tokenizer gpt2 --token_dtype u16 --add_metadata --add_unigram --shards 128 --workers 128 --worker_id $WORKER_ID --file_start $START_FILE --file_end $END_FILE --batch_size 65536 --cpus 25 --mem 20 --ulimit 1048576 --gcs_output_bucket consus-dataproc --gcs_output_prefix infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged"
+            echo "Command: python3 pkg/infini_gram/indexing.py --gcs_bucket consus-dataproc --gcs_prefix ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged --data_dir /tmp/indexing --save_dir /tmp/indexing --temp_dir /tmp/indexing --version 4 --tokenizer gpt2 --token_dtype u16 --add_metadata --add_unigram --shards 64 --workers 64 --worker_id $WORKER_ID --file_start $START_FILE --file_end $END_FILE --batch_size 65536 --cpus 25 --mem 20 --ulimit 1048576 --gcs_output_bucket consus-dataproc --gcs_output_prefix infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged"
             python3 pkg/infini_gram/indexing.py \
               --gcs_bucket "consus-dataproc" \
               --gcs_prefix "ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged" \
@@ -174,8 +183,8 @@ spec:
               --token_dtype u16 \
               --add_metadata \
               --add_unigram \
-              --shards 128 \
-              --workers 128 \
+              --shards 64 \
+              --workers 64 \
               --worker_id $WORKER_ID \
               --file_start $START_FILE \
               --file_end $END_FILE \
@@ -201,18 +210,23 @@ spec:
               fieldPath: metadata.name
         - name: DEBUG
           value: "true"
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: huggingface-token-secret
+              key: token
 
 
         
         resources:
           requests:
-            memory: "24Gi"    # Increased for indexing workload
-            cpu: "8"
-            ephemeral-storage: "80Gi"  # Increased storage request
+            memory: "45Gi"    # Increased for indexing workload
+            cpu: "70"
+            ephemeral-storage: "380Gi"  # Increased storage request
           limits:
-            memory: "64Gi"   # Increased memory limit
-            cpu: "20"
-            ephemeral-storage: "200Gi"  # Increased storage limit
+            memory: "45Gi"   # Increased memory limit
+            cpu: "70"
+            ephemeral-storage: "380Gi"  # Increased storage limit
         
         volumeMounts:
         - name: gcp-credentials
