@@ -175,9 +175,8 @@ spec:
             python3 pkg/infini_gram/indexing.py \
               --gcs_bucket "consus-dataproc" \
               --gcs_prefix "ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged" \
-              --data_dir "/tmp/indexing" \
-              --save_dir "/tmp/indexing" \
-              --temp_dir "/tmp/indexing" \
+              --save_dir "/tmp/indexing/$WORKER_ID" \
+              --temp_dir "/tmp/indexing/$WORKER_ID/temp" \
               --version 4 \
               --tokenizer gpt2 \
               --token_dtype u16 \
@@ -193,7 +192,7 @@ spec:
               --mem 20 \
               --ulimit 1048576 \
               --gcs_output_bucket "consus-dataproc" \
-              --gcs_output_prefix "infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged"
+              --gcs_output_prefix "infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/$WORKER_ID"
           fi
           
           echo "Worker $WORKER_ID completed successfully"
