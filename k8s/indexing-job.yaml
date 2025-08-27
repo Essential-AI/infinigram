@@ -7,6 +7,7 @@ spec:
   backoffLimit: 50
   completions: 64
   parallelism: 64
+  completionMode: Indexed
   template:
     spec:
       restartPolicy: Never
@@ -22,181 +23,8 @@ spec:
       containers:
       - name: indexing-worker
         image: gcr.io/consus-394000/ashish/infinigram:latest
-        command: ["/bin/bash"]
-        args:
-        - -c
-        - |
-          set -e
-          
-          # Install GCP CLI tools first
-          apt-get update && apt-get install -y curl build-essential cmake pkg-config libprotobuf-dev protobuf-compiler
-          curl -sSL https://sdk.cloud.google.com | bash
-          export PATH=$PATH:/root/google-cloud-sdk/bin
-          
-          # Install additional dependencies
-          export CFLAGS="-O2"
-          export CXXFLAGS="-O2"
-          pip install --upgrade pip setuptools wheel
-          pip install pandas pyarrow google-cloud-storage tqdm
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install transformers
-          pip install sentencepiece --no-cache-dir --verbose
-          
-          # Verify installations
-          echo "=== Checking Dependencies ==="
-          python3 -c "import sentencepiece; print('sentencepiece version:', sentencepiece.__version__)" || echo "sentencepiece NOT installed"
-          python3 -c "import transformers; print('transformers version:', transformers.__version__)" || echo "transformers NOT installed"
-          python3 -c "import torch; print('PyTorch version:', torch.__version__)" || echo "PyTorch NOT installed"
-          echo "=== Testing Llama Tokenizer ==="
-          python3 -c "from transformers import AutoTokenizer; tokenizer = AutoTokenizer.from_pretrained('gpt2', use_fast=False, add_bos_token=False, add_eos_token=False); print('GPT-2 tokenizer loaded successfully!')"
-          echo "============================"
-          
-          # Install Hugging Face Hub for transformers
-          pip install huggingface_hub
-          
-          # Ensure Python is in PATH
-          export PATH=$PATH:/usr/local/bin
-          python3 --version || python --version
-          
-          # Set GCP credentials
-          export GOOGLE_APPLICATION_CREDENTIALS="/gcp-credentials/service-account.json"
-          
-          # Calculate worker parameters for range-based division
-          WORKER_ID=${JOB_COMPLETION_INDEX:-0}
-          if [ -z "$WORKER_ID" ] || [ "$WORKER_ID" = "0" ]; then
-            # Fallback: extract worker ID from pod name
-            WORKER_ID=$(echo $POD_NAME | grep -o '[0-9]*$' | head -1)
-            WORKER_ID=${WORKER_ID:-0}
-          fi
-          TOTAL_WORKERS=64
-          
-          # Ensure worker ID is within valid range [0, TOTAL_WORKERS-1]
-          WORKER_ID=$((WORKER_ID % TOTAL_WORKERS))
-          
-          echo "Raw JOB_COMPLETION_INDEX: ${JOB_COMPLETION_INDEX:-'not set'}"
-          echo "Raw POD_NAME: $POD_NAME"
-          echo "Calculated WORKER_ID: $WORKER_ID"
-          echo "Using worker ID: $WORKER_ID"
-          
-          # Debug: Check if this worker will have any files to process
-          echo "Checking if this worker will have files to process..."
-          echo "Testing gsutil access..."
-          gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/ | head -3
-          echo "Counting parquet files..."
-          TOTAL_FILES=$(gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/**/*.parquet | wc -l)
-          echo "Raw gsutil output:"
-          gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/**/*.parquet | head -10
-          FILES_PER_WORKER=$((TOTAL_FILES / TOTAL_WORKERS))
-          START_FILE=$((WORKER_ID * FILES_PER_WORKER))
-          END_FILE=$((START_FILE + FILES_PER_WORKER))
-          echo "Total files: $TOTAL_FILES, Files per worker: $FILES_PER_WORKER"
-          echo "This worker (ID: $WORKER_ID) will process files $START_FILE to $((END_FILE - 1))"
-          
-          # Count total parquet files dynamically
-          echo "Counting total parquet files..."
-          TOTAL_FILES=$(gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/**/*.parquet | wc -l)
-          echo "Found $TOTAL_FILES total parquet files"
-          
-          # List first few files to verify access
-          echo "First 5 parquet files:"
-          gsutil ls gs://consus-dataproc/ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/**/*.parquet | head -5
-          
-          # Check if we have enough files for all workers
-          if [ $TOTAL_FILES -lt $TOTAL_WORKERS ]; then
-            echo "WARNING: Only $TOTAL_FILES files for $TOTAL_WORKERS workers!"
-            echo "Some workers will have no files to process."
-          fi
-          
-          # Calculate file range for this worker
-          echo "Calculating file range..."
-          echo "TOTAL_FILES=$TOTAL_FILES, TOTAL_WORKERS=$TOTAL_WORKERS, WORKER_ID=$WORKER_ID"
-          FILES_PER_WORKER=$((TOTAL_FILES / TOTAL_WORKERS))
-          START_FILE=$((WORKER_ID * FILES_PER_WORKER))
-          END_FILE=$((START_FILE + FILES_PER_WORKER))
-          echo "FILES_PER_WORKER=$FILES_PER_WORKER, START_FILE=$START_FILE, END_FILE=$END_FILE"
-          
-          # Last worker gets remaining files
-          if [ $WORKER_ID -eq $((TOTAL_WORKERS - 1)) ]; then
-            END_FILE=$TOTAL_FILES
-            echo "Last worker: END_FILE adjusted to $END_FILE"
-          fi
-          
-          echo "Starting indexing worker $WORKER_ID of $TOTAL_WORKERS"
-          echo "Processing files $START_FILE to $((END_FILE - 1)) (total: $((END_FILE - START_FILE)) files)"
-          
-          # Check if this worker has any files to process
-          echo "Validating file range..."
-          echo "START_FILE=$START_FILE, TOTAL_FILES=$TOTAL_FILES"
-          if [ $START_FILE -ge $TOTAL_FILES ]; then
-            echo "WARNING: Worker $WORKER_ID has no files to process (START_FILE=$START_FILE >= TOTAL_FILES=$TOTAL_FILES)"
-            echo "This worker will create empty index files."
-          else
-            echo "Worker $WORKER_ID will process files $START_FILE to $((END_FILE - 1))"
-          fi
-          
-          # Monitor system resources
-          echo "=== System Resources ==="
-          df -h /tmp
-          free -h
-          echo "========================"
-          
-          # Check file system
-          echo "=== File System Check ==="
-          ls -la /tmp/
-          echo "========================"
-          
-          # Test tokenizer loading
-          echo "=== Testing Tokenizer ==="
-          python3 -c "import os; print('HF_TOKEN:', os.environ.get('HF_TOKEN', 'NOT SET'))"
-          python3 -c "from transformers import AutoTokenizer; print('Transformers imported successfully')"
-          echo "========================="
-          
-          # Run indexing for this worker with file range
-          echo "Starting indexing with parameters:"
-          echo "  Worker ID: $WORKER_ID"
-          echo "  File range: $START_FILE to $((END_FILE - 1))"
-          echo "  Data dir: /tmp/indexing"
-          
-          # Check if we have any files to process
-          if [ $START_FILE -ge $TOTAL_FILES ]; then
-            echo "Worker $WORKER_ID has no files to process. Creating empty index files..."
-            # Create empty index files for this worker's shards
-            SHARDS=64
-            echo "Worker $WORKER_ID responsible for shards: $(seq $WORKER_ID $TOTAL_WORKERS $((64 - 1)))"
-            for i in $(seq $WORKER_ID $TOTAL_WORKERS $((64 - 1))); do
-              echo "Creating empty index file for shard $i"
-              touch "/tmp/indexing/tokenized.$i"
-              touch "/tmp/indexing/offset.$i"
-            done
-            echo "Empty index files created. Worker $WORKER_ID completed."
-          else
-            echo "Worker $WORKER_ID has files to process. Running indexing..."
-            echo "Command: python3 pkg/infini_gram/indexing.py --gcs_bucket consus-dataproc --gcs_prefix ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged --data_dir /tmp/indexing --save_dir /tmp/indexing --temp_dir /tmp/indexing --version 4 --tokenizer gpt2 --token_dtype u16 --add_metadata --add_unigram --shards 64 --workers 64 --worker_id $WORKER_ID --file_start $START_FILE --file_end $END_FILE --batch_size 65536 --cpus 25 --mem 20 --ulimit 1048576 --gcs_output_bucket consus-dataproc --gcs_output_prefix infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged"
-            python3 pkg/infini_gram/indexing.py \
-              --gcs_bucket "consus-dataproc" \
-              --gcs_prefix "ritvik/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged" \
-              --save_dir "/tmp/indexing/$WORKER_ID" \
-              --temp_dir "/tmp/indexing/$WORKER_ID/temp" \
-              --version 4 \
-              --tokenizer gpt2 \
-              --token_dtype u16 \
-              --add_metadata \
-              --add_unigram \
-              --shards 64 \
-              --workers 64 \
-              --worker_id $WORKER_ID \
-              --file_start $START_FILE \
-              --file_end $END_FILE \
-              --batch_size 65536 \
-              --cpus 25 \
-              --mem 20 \
-              --ulimit 1048576 \
-              --gcs_output_bucket "consus-dataproc" \
-              --gcs_output_prefix "infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/$WORKER_ID"
-          fi
-          
-          echo "Worker $WORKER_ID completed successfully"
-          echo "Final status: Worker $WORKER_ID finished processing"
+        command: ["python3"]
+        args: ["/scripts/indexing_worker.py"]
         
         env:
         - name: JOB_COMPLETION_INDEX
@@ -214,29 +42,28 @@ spec:
             secretKeyRef:
               name: huggingface-token-secret
               key: token
-
-
-        
         resources:
           requests:
-            memory: "45Gi"    # Increased for indexing workload
+            memory: "500Gi"    # Increased for indexing workload
             cpu: "70"
-            ephemeral-storage: "380Gi"  # Increased storage request
-          limits:
-            memory: "45Gi"   # Increased memory limit
-            cpu: "70"
-            ephemeral-storage: "380Gi"  # Increased storage limit
-        
+            ephemeral-storage: "800Gi"  # Increased storage request
         volumeMounts:
         - name: gcp-credentials
           mountPath: /gcp-credentials
           readOnly: true
         - name: temp-volume
           mountPath: /tmp
+        - name: indexing-script
+          mountPath: /scripts
+          readOnly: true
       
       volumes:
       - name: gcp-credentials
         secret:
           secretName: gcp-service-account-secret
       - name: temp-volume
-        emptyDir: {} 
+        emptyDir: {}
+      - name: indexing-script
+        configMap:
+          name: indexing-worker-script
+          defaultMode: 0755 
