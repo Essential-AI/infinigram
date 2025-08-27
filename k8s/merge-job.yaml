@@ -13,30 +13,8 @@ spec:
       containers:
       - name: merge-worker
         image: gcr.io/consus-394000/ashish/infinigram:latest
-        command: ["/bin/bash"]
-        args:
-        - -c
-        - |
-          set -e
-          
-          # Install GCP CLI tools first
-          apt-get update && apt-get install -y curl build-essential cmake pkg-config libprotobuf-dev protobuf-compiler
-          curl -sSL https://sdk.cloud.google.com | bash
-          export PATH=$PATH:/root/google-cloud-sdk/bin
-          
-          # Install additional dependencies
-          export CFLAGS="-O2"
-          export CXXFLAGS="-O2"
-          pip install --upgrade pip setuptools wheel
-          pip install pandas pyarrow google-cloud-storage tqdm
-          # Ensure Python is in PATH
-          export PATH=$PATH:/usr/local/bin
-          python3 --version || python --version
-          # Set GCP credentials
-          export GOOGLE_APPLICATION_CREDENTIALS="/gcp-credentials/service-account.json"
-          
-          # Run merge command
-          ./rust_indexing merge --data-file /path/to/data-file --parts-dir /path/to/parts-dir --merged-dir /path/to/merged-dir --num-threads 4 --hacksize 1024 --ratio 1 --token-width 16
+        command: ["python3"]
+        args: ["/scripts/merge_worker.py"]
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: "/gcp-credentials/service-account.json"
@@ -57,22 +35,25 @@ spec:
               key: token
         resources:
           requests:
-            memory: "45Gi"    # Increased for indexing workload
+            memory: "500Gi"    # Increased for indexing workload
             cpu: "70"
-            ephemeral-storage: "380Gi"  # Increased storage request
-          limits:
-            memory: "45Gi"   # Increased memory limit
-            cpu: "70"
-            ephemeral-storage: "380Gi"  # Increased storage limit
+            ephemeral-storage: "800Gi"  # Increased storage request
         volumeMounts:
         - name: gcp-credentials
           mountPath: /gcp-credentials
           readOnly: true
         - name: temp-volume
           mountPath: /tmp
+        - name: merge-worker-script
+          mountPath: /scripts
+          readOnly: true
       volumes:
       - name: gcp-credentials
         secret:
           secretName: gcp-service-account-secret
       - name: temp-volume
         emptyDir: {}
+      - name: merge-worker-script
+        configMap:
+          name: merge-worker-script
+          defaultMode: 0755

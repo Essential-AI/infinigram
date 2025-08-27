@@ -1,0 +1,178 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: merge-worker-script
+  namespace: ashish
+data:
+  merge_worker.py: |
+    #!/usr/bin/env python3
+    """
+    InfiniGram Merge Worker
+    Merges index files from distributed processing
+    """
+
+    import os
+    import sys
+    import subprocess
+    import logging
+    import json
+    from pathlib import Path
+
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
+
+    def run_command(cmd, check=True, shell=True):
+        """Run a shell command and return result"""
+        logger.info(f"Running: {cmd}")
+        result = subprocess.run(cmd, shell=shell, capture_output=True, text=True)
+        if check and result.returncode != 0:
+            logger.error(f"Command failed: {cmd}")
+            logger.error(f"Error: {result.stderr}")
+            sys.exit(result.returncode)
+        return result
+
+    def install_dependencies():
+        """Install required system and Python dependencies"""
+        logger.info("=== Installing Dependencies ===")
+        
+        # Install system dependencies
+        run_command("apt-get update && apt-get install -y curl build-essential cmake pkg-config libprotobuf-dev protobuf-compiler")
+        
+        # Install GCP CLI
+        run_command("curl -sSL https://sdk.cloud.google.com | bash")
+        os.environ['PATH'] = f"{os.environ['PATH']}:/root/google-cloud-sdk/bin"
+        
+        # Install Python dependencies
+        os.environ['CFLAGS'] = "-O2"
+        os.environ['CXXFLAGS'] = "-O2"
+        
+        run_command("pip install --upgrade pip setuptools wheel")
+        run_command("pip install pandas pyarrow google-cloud-storage tqdm")
+        
+        # Ensure Python is in PATH
+        os.environ['PATH'] = f"{os.environ['PATH']}:/usr/local/bin"
+        
+        # Check Python version
+        try:
+            result = run_command("python3 --version", check=False)
+            if result.returncode == 0:
+                logger.info(f"Python3 version: {result.stdout.strip()}")
+            else:
+                result = run_command("python --version", check=False)
+                logger.info(f"Python version: {result.stdout.strip()}")
+        except Exception as e:
+            logger.error(f"Failed to get Python version: {e}")
+
+    def download_index_parts():
+        """Download index parts from GCS"""
+        logger.info("=== Downloading Index Parts ===")
+        
+        # Create local directories
+        parts_dir = "/tmp/merge/parts"
+        merged_dir = "/tmp/merge/merged"
+        Path(parts_dir).mkdir(parents=True, exist_ok=True)
+        Path(merged_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Download all index parts from GCS
+        index_source = "gs://consus-dataproc/infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/index/"
+        logger.info(f"Downloading index parts from: {index_source}")
+        
+        # Download all index files recursively
+        run_command(f'gsutil -m cp -r "{index_source}*" "{parts_dir}/"')
+        
+        # Count downloaded files
+        result = run_command(f'find "{parts_dir}" -type f -name "*.bin" | wc -l', check=False)
+        bin_files = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+        
+        result = run_command(f'find "{parts_dir}" -type f | wc -l', check=False)
+        total_files = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+        
+        logger.info(f"Downloaded {total_files} total files, {bin_files} .bin files")
+        
+        return parts_dir, merged_dir
+
+    def run_merge_process(parts_dir, merged_dir):
+        """Run the merge process using rust_indexing"""
+        logger.info("=== Running Merge Process ===")
+        
+        # Create a dummy data file path (required by rust_indexing but not used for merge)
+        data_file_path = "/tmp/merge/dummy_data.txt"
+        with open(data_file_path, 'w') as f:
+            f.write("dummy")
+        
+        # Run the merge command
+        merge_cmd = [
+            "./rust_indexing", "merge",
+            "--data-file", data_file_path,
+            "--parts-dir", parts_dir,
+            "--merged-dir", merged_dir,
+            "--num-threads", "4",
+            "--hacksize", "1024", 
+            "--ratio", "1",
+            "--token-width", "16"
+        ]
+        
+        logger.info(f"Running merge: {' '.join(merge_cmd)}")
+        run_command(' '.join(merge_cmd))
+        
+        # Check merge results
+        result = run_command(f'find "{merged_dir}" -type f | wc -l', check=False)
+        merged_files = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+        logger.info(f"Merge completed. Generated {merged_files} merged files")
+        
+        return merged_dir
+
+    def upload_merged_results(merged_dir):
+        """Upload merged results to GCS"""
+        logger.info("=== Uploading Merged Results ===")
+        
+        # Upload merged index to GCS
+        merged_output = "gs://consus-dataproc/infinigram/ramanujan2_data/stem/4_join/output/nemotron-cc-fineweb-edu-merged/merged_index/"
+        logger.info(f"Uploading merged index to: {merged_output}")
+        
+        if Path(merged_dir).exists() and any(Path(merged_dir).iterdir()):
+            run_command(f'gsutil -m cp -r "{merged_dir}/*" "{merged_output}"')
+            logger.info("Merged index uploaded successfully")
+        else:
+            logger.warning("No merged files found to upload")
+
+    def monitor_resources():
+        """Monitor system resources"""
+        logger.info("=== System Resources ===")
+        run_command("df -h /tmp", check=False)
+        run_command("free -h", check=False)
+        logger.info("========================")
+
+    def main():
+        """Main merge worker function"""
+        logger.info("Starting InfiniGram Merge Worker")
+        
+        try:
+            # Set up environment
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "/gcp-credentials/service-account.json"
+            os.environ['PATH'] = f"{os.environ['PATH']}:/usr/local/bin"
+            
+            # Install dependencies
+            install_dependencies()
+            
+            # Monitor resources
+            monitor_resources()
+            
+            # Download index parts
+            parts_dir, merged_dir = download_index_parts()
+            
+            # Run merge process
+            run_merge_process(parts_dir, merged_dir)
+            
+            # Upload results
+            upload_merged_results(merged_dir)
+            
+            logger.info("Merge worker completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Merge worker failed with error: {e}")
+            sys.exit(1)
+
+    if __name__ == "__main__":
+        main()
