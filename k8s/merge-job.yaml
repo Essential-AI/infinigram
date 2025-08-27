@@ -37,7 +37,7 @@ spec:
           requests:
             memory: "500Gi"    # Increased for indexing workload
             cpu: "70"
-            ephemeral-storage: "800Gi"  # Increased storage request
+            ephemeral-storage: "10000Gi"  # Increased storage request
         volumeMounts:
         - name: gcp-credentials
           mountPath: /gcp-credentials
